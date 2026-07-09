@@ -55,7 +55,7 @@ fn main() {
                 println!(
                     "{}",
                     serde_json::to_string(&entries)
-                        .unwrap_or("Cannot parse json".to_string())
+                        .unwrap_or_else(|e| format!("Cannot serialize to JSON: {e}"))
                 );
             } else {
                 print_table(&path);
@@ -111,6 +111,11 @@ fn map_data(file: fs::DirEntry, data: &mut Vec<FileEntry>) {
                 String::default()
             },
         })
+    } else {
+        eprintln!(
+            "Warning: cannot read metadata for '{}', skipping",
+            file.path().display()
+        );
     }
 }
 
@@ -159,8 +164,8 @@ fn format_relative_time(date: DateTime<Utc>) -> String {
         return format!("{} day{} ago", days, if days == 1 { "" } else { "s" });
     }
 
-    let months = days / 30;
-    if months < 12 {
+    if days < 365 {
+        let months = days / 30;
         return format!("{} month{} ago", months, if months == 1 { "" } else { "s" });
     }
 
