@@ -2,6 +2,7 @@
 name = "bestls"
 version = "0.1.0"
 edition = "2024"
+description = "A user-friendly ls alternative with human-readable sizes and relative timestamps"
 author = "zhaoxin"
 
 [dependencies]

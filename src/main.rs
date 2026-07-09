@@ -17,12 +17,17 @@ use tabled::{
     },
 };
 
+/// Whether a filesystem entry is a file or directory.
 #[derive(Debug, Display, Serialize)]
 enum EntryType {
     File,
     Dir,
 }
 
+/// A filesystem entry displayed in the output table.
+///
+/// Columns: `Name` (entry name), `Type` (File/Dir), `Size` (human-readable),
+/// `Modified` (relative timestamp).
 #[derive(Debug, Tabled, Serialize)]
 struct FileEntry {
     #[tabled{rename="Name"}]
@@ -35,6 +40,10 @@ struct FileEntry {
     modified: String,
 }
 
+/// Command-line interface for bestls.
+///
+/// Accepts an optional directory path and a `--json` flag for
+/// machine-readable JSON output instead of the default colored table.
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = "Best Ls command ever")]
 struct CLI {
@@ -119,6 +128,11 @@ fn map_data(file: fs::DirEntry, data: &mut Vec<FileEntry>) {
     }
 }
 
+/// Format a byte count as a human-readable string.
+///
+/// Bytes are displayed as whole numbers (e.g. `42 B`).
+/// Values ≥ 1 KB are displayed with 1 decimal place (e.g. `1.5 KB`).
+/// Supports up to terabytes (TB).
 fn format_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut size = bytes as f64;
@@ -136,6 +150,10 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Format a UTC timestamp as a relative time phrase.
+///
+/// Returns phrases like `just now`, `3 minutes ago`, `2 days ago`,
+/// `1 month ago`, or `5 years ago` based on the elapsed time since `date`.
 fn format_relative_time(date: DateTime<Utc>) -> String {
     let now = Utc::now();
     let duration = now.signed_duration_since(date);
