@@ -29,8 +29,9 @@ struct FileEntry {
     name: String,
     #[tabled{rename="Type"}]
     e_type: EntryType,
-    #[tabled{rename="Size B"}]
-    len_bytes: u64,
+    #[tabled{rename="Size"}]
+    size: String,
+    #[tabled{rename="Modified"}]
     modified: String,
 }
 
@@ -102,13 +103,67 @@ fn map_data(file: fs::DirEntry, data: &mut Vec<FileEntry>) {
             } else {
                 EntryType::File
             },
-            len_bytes: meta.len(),
+            size: format_size(meta.len()),
             modified: if let Ok(modi) = meta.modified() {
                 let date: DateTime<Utc> = modi.into();
-                format!("{}", date.format("%a %b %e %Y"))
+                format_relative_time(date)
             } else {
                 String::default()
             },
         })
     }
+}
+
+fn format_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+
+    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+
+    if unit_idx == 0 {
+        format!("{} {}", bytes, UNITS[unit_idx])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit_idx])
+    }
+}
+
+fn format_relative_time(date: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(date);
+
+    if duration.num_seconds() < 0 {
+        return String::from("in the future");
+    }
+
+    let secs = duration.num_seconds();
+    if secs < 60 {
+        return String::from("just now");
+    }
+
+    let mins = duration.num_minutes();
+    if mins < 60 {
+        return format!("{} minute{} ago", mins, if mins == 1 { "" } else { "s" });
+    }
+
+    let hours = duration.num_hours();
+    if hours < 24 {
+        return format!("{} hour{} ago", hours, if hours == 1 { "" } else { "s" });
+    }
+
+    let days = duration.num_days();
+    if days < 30 {
+        return format!("{} day{} ago", days, if days == 1 { "" } else { "s" });
+    }
+
+    let months = days / 30;
+    if months < 12 {
+        return format!("{} month{} ago", months, if months == 1 { "" } else { "s" });
+    }
+
+    let years = days / 365;
+    format!("{} year{} ago", years, if years == 1 { "" } else { "s" })
 }
