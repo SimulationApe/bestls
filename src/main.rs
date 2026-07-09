@@ -2,18 +2,16 @@ use chrono::{DateTime, Utc};
 use clap::Parser;
 use owo_colors::OwoColorize;
 use serde::Serialize;
-use strum::Display;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
+use strum::Display;
 use tabled::{
-    Table, 
-    Tabled, 
+    Table, Tabled,
     settings::{
-        Style, 
-        Color, 
-        object:: {Columns, Rows}
+        Color, Style,
+        object::{Columns, Rows},
     },
 };
 
@@ -46,14 +44,14 @@ struct FileEntry {
 /// machine-readable JSON output instead of the default colored table.
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = "Best Ls command ever")]
-struct CLI {
+struct Cli {
     path: Option<PathBuf>,
     #[arg(short, long)]
     json: bool,
 }
 
 fn main() {
-    let cli = CLI::parse();
+    let cli = Cli::parse();
 
     let path = cli.path.unwrap_or(PathBuf::from("."));
 
@@ -91,17 +89,15 @@ fn print_table(path: &Path) {
 fn get_files(path: &Path) -> Vec<FileEntry> {
     let mut data = Vec::default();
     if let Ok(read_dir) = fs::read_dir(path) {
-        for entry in read_dir {
-            if let Ok(file) = entry {
-                map_data(file, &mut data);
-            }
+        for file in read_dir.flatten() {
+            map_data(file, &mut data);
         }
     }
     data
 }
 
 fn map_data(file: fs::DirEntry, data: &mut Vec<FileEntry>) {
-    if let Ok(meta) = fs::metadata(&file.path()) {
+    if let Ok(meta) = fs::metadata(file.path()) {
         data.push(FileEntry {
             name: file
                 .file_name()
