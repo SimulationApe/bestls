@@ -11,7 +11,7 @@ A user-friendly alternative to `ls` with human-readable output.
 
 ## Usage
 
-```
+```shell
 bestls [PATH] [--json]
 ```
 

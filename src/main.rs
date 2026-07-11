@@ -4,9 +4,9 @@ use owo_colors::OwoColorize;
 use serde::Serialize;
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
-use strum::Display;
 use tabled::{
     Table, Tabled,
     settings::{
@@ -15,33 +15,108 @@ use tabled::{
     },
 };
 
-/// Whether a filesystem entry is a file or directory.
-#[derive(Debug, Display, Serialize)]
+/// File type classification with emoji for display badges.
+#[derive(Debug, Clone, Copy)]
 enum EntryType {
     File,
     Dir,
+    Symlink,
+    Pipe,
+    Socket,
+    BlockDevice,
+    CharDevice,
 }
 
-/// A filesystem entry displayed in the output table.
-///
-/// Columns: `Name` (entry name), `Type` (File/Dir), `Size` (human-readable),
-/// `Modified` (relative timestamp).
-#[derive(Debug, Tabled, Serialize)]
-struct FileEntry {
-    #[tabled{rename="Name"}]
+impl EntryType {
+    /// Detect file type from Unix mode bits.
+    fn from_mode(mode: u32) -> Self {
+        match mode & libc::S_IFMT {
+            libc::S_IFDIR => Self::Dir,
+            libc::S_IFLNK => Self::Symlink,
+            libc::S_IFIFO => Self::Pipe,
+            libc::S_IFSOCK => Self::Socket,
+            libc::S_IFBLK => Self::BlockDevice,
+            libc::S_IFCHR => Self::CharDevice,
+            _ => Self::File,
+        }
+    }
+
+    /// Plain display name (used in JSON output).
+    fn name(&self) -> &str {
+        match self {
+            Self::File => "File",
+            Self::Dir => "Dir",
+            Self::Symlink => "Symlink",
+            Self::Pipe => "Pipe",
+            Self::Socket => "Socket",
+            Self::BlockDevice => "Block Device",
+            Self::CharDevice => "Char Device",
+        }
+    }
+
+    /// Colored badge string for table display: emoji + name with color.
+    fn format_badge(&self) -> String {
+        let emoji = match self {
+            Self::File => "\u{1f4c4}",
+            Self::Dir => "\u{1f4c1}",
+            Self::Symlink => "\u{1f517}",
+            Self::Pipe => "\u{1f4e1}",
+            Self::Socket => "\u{1f50c}",
+            Self::BlockDevice => "\u{1f4be}",
+            Self::CharDevice => "\u{2328}\u{fe0f}",
+        };
+
+        let label: String = match self {
+            Self::File => "File".bright_white().to_string(),
+            Self::Dir => "Dir".bright_blue().to_string(),
+            Self::Symlink => "Symlink".bright_cyan().to_string(),
+            Self::Pipe => "Pipe".yellow().to_string(),
+            Self::Socket => "Socket".bright_green().to_string(),
+            Self::BlockDevice => "Block".bright_magenta().to_string(),
+            Self::CharDevice => "Char".bright_magenta().to_string(),
+        };
+
+        format!("{} {}", emoji, label)
+    }
+}
+
+/// Raw filesystem entry data (before formatting for any output mode).
+#[derive(Debug)]
+struct RawEntry {
     name: String,
-    #[tabled{rename="Type"}]
-    e_type: EntryType,
-    #[tabled{rename="Size"}]
+    file_type: EntryType,
+    mode: u32,
+    size: u64,
+    modified: String,
+}
+
+/// A filesystem entry for table display with colored badges and visual permissions.
+#[derive(Debug, Tabled)]
+struct FileEntry {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Type")]
+    entry_type: String,
+    #[tabled(rename = "Permissions")]
+    permissions: String,
+    #[tabled(rename = "Size")]
     size: String,
-    #[tabled{rename="Modified"}]
+    #[tabled(rename = "Modified")]
+    modified: String,
+}
+
+/// A filesystem entry for JSON output (plain values, no ANSI).
+#[derive(Debug, Serialize)]
+struct FileEntryJson {
+    name: String,
+    #[serde(rename = "type")]
+    entry_type: String,
+    permissions: String,
+    size: String,
     modified: String,
 }
 
 /// Command-line interface for bestls.
-///
-/// Accepts an optional directory path and a `--json` flag for
-/// machine-readable JSON output instead of the default colored table.
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = "Best Ls command ever")]
 struct Cli {
@@ -52,20 +127,27 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-
     let path = cli.path.unwrap_or(PathBuf::from("."));
 
     if let Ok(does_exist) = fs::exists(&path) {
         if does_exist {
+            let raw_entries = get_files(&path);
             if cli.json {
-                let entries = get_files(&path);
+                let entries: Vec<FileEntryJson> = raw_entries
+                    .iter()
+                    .map(|r| to_file_entry_json(r))
+                    .collect();
                 println!(
                     "{}",
                     serde_json::to_string(&entries)
                         .unwrap_or_else(|e| format!("Cannot serialize to JSON: {e}"))
                 );
             } else {
-                print_table(&path);
+                let entries: Vec<FileEntry> = raw_entries
+                    .iter()
+                    .map(|r| to_file_entry(r))
+                    .collect();
+                print_table(entries);
             }
         } else {
             println!("{}", "Path does not exist".red());
@@ -75,60 +157,98 @@ fn main() {
     }
 }
 
-fn print_table(path: &Path) {
-    let get_files = get_files(path);
-    let mut table = Table::new(get_files);
+fn print_table(entries: Vec<FileEntry>) {
+    let mut table = Table::new(entries);
     table.with(Style::rounded());
     table.modify(Columns::first(), Color::FG_BRIGHT_CYAN);
-    table.modify(Columns::one(2), Color::FG_BRIGHT_MAGENTA);
     table.modify(Columns::one(3), Color::FG_BRIGHT_YELLOW);
     table.modify(Rows::first(), Color::FG_BRIGHT_GREEN);
     println!("{}", table);
 }
 
-fn get_files(path: &Path) -> Vec<FileEntry> {
-    let mut data = Vec::default();
+fn get_files(path: &Path) -> Vec<RawEntry> {
+    let mut data = Vec::new();
     if let Ok(read_dir) = fs::read_dir(path) {
         for file in read_dir.flatten() {
-            map_data(file, &mut data);
+            if let Some(entry) = map_data(file) {
+                data.push(entry);
+            }
         }
     }
     data
 }
 
-fn map_data(file: fs::DirEntry, data: &mut Vec<FileEntry>) {
-    if let Ok(meta) = fs::metadata(file.path()) {
-        data.push(FileEntry {
-            name: file
-                .file_name()
-                .into_string()
-                .unwrap_or("unknown name".into()),
-            e_type: if meta.is_dir() {
-                EntryType::Dir
-            } else {
-                EntryType::File
-            },
-            size: format_size(meta.len()),
-            modified: if let Ok(modi) = meta.modified() {
-                let date: DateTime<Utc> = modi.into();
-                format_relative_time(date)
-            } else {
-                String::default()
-            },
-        })
+fn map_data(file: fs::DirEntry) -> Option<RawEntry> {
+    // Check if this is a symlink first -- metadata() follows symlinks.
+    let is_symlink = file.file_type().ok().map(|ft| ft.is_symlink()).unwrap_or(false);
+
+    // Use metadata() for the target (for size/date), but symlink_metadata()
+    // for the symlink itself (for permissions and type detection).
+    let meta = match fs::metadata(file.path()) {
+        Ok(m) => m,
+        Err(_) => {
+            eprintln!(
+                "Warning: cannot read metadata for '{}', skipping",
+                file.path().display()
+            );
+            return None;
+        }
+    };
+
+    let (mode, file_type) = if is_symlink {
+        // symlink_metadata gives us the symlink's own mode, not the target's.
+        let sym_mode = fs::symlink_metadata(file.path())
+            .ok()
+            .map(|m| m.permissions().mode())
+            .unwrap_or(libc::S_IFLNK | 0o777);
+        (sym_mode, EntryType::Symlink)
     } else {
-        eprintln!(
-            "Warning: cannot read metadata for '{}', skipping",
-            file.path().display()
-        );
+        let m = meta.permissions().mode();
+        (m, EntryType::from_mode(m))
+    };
+    let size = meta.len();
+    let modified = if let Ok(modi) = meta.modified() {
+        let date: DateTime<Utc> = modi.into();
+        format_relative_time(date)
+    } else {
+        String::default()
+    };
+
+    let name = file
+        .file_name()
+        .into_string()
+        .unwrap_or_else(|_| "unknown name".into());
+
+    Some(RawEntry {
+        name,
+        file_type,
+        mode,
+        size,
+        modified,
+    })
+}
+
+fn to_file_entry(raw: &RawEntry) -> FileEntry {
+    FileEntry {
+        name: raw.name.clone(),
+        entry_type: raw.file_type.format_badge(),
+        permissions: format_permissions_visual(raw.mode),
+        size: format_size(raw.size),
+        modified: raw.modified.clone(),
+    }
+}
+
+fn to_file_entry_json(raw: &RawEntry) -> FileEntryJson {
+    FileEntryJson {
+        name: raw.name.clone(),
+        entry_type: raw.file_type.name().to_string(),
+        permissions: format_permissions_traditional(raw.mode),
+        size: format_size(raw.size),
+        modified: raw.modified.clone(),
     }
 }
 
 /// Format a byte count as a human-readable string.
-///
-/// Bytes are displayed as whole numbers (e.g. `42 B`).
-/// Values ≥ 1 KB are displayed with 1 decimal place (e.g. `1.5 KB`).
-/// Supports up to terabytes (TB).
 fn format_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut size = bytes as f64;
@@ -146,10 +266,76 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Format a UTC timestamp as a relative time phrase.
+/// Format Unix permission mode bits as a visual color-coded string.
 ///
-/// Returns phrases like `just now`, `3 minutes ago`, `2 days ago`,
-/// `1 month ago`, or `5 years ago` based on the elapsed time since `date`.
+/// Returns strings like `[rwx][r-x][r--]` where each r/w/x character
+/// is colored green when present and red dash when absent. Each permission
+/// group (owner/group/other) is wrapped in brackets.
+fn format_permissions_visual(mode: u32) -> String {
+    let perm_bit = |mask: u32, ch: char| -> String {
+        if mode & mask != 0 {
+            ch.green().to_string()
+        } else {
+            '-'.red().to_string()
+        }
+    };
+
+    let owner = format!(
+        "{}{}{}",
+        perm_bit(libc::S_IRUSR, 'r'),
+        perm_bit(libc::S_IWUSR, 'w'),
+        perm_bit(libc::S_IXUSR, 'x'),
+    );
+    let group = format!(
+        "{}{}{}",
+        perm_bit(libc::S_IRGRP, 'r'),
+        perm_bit(libc::S_IWGRP, 'w'),
+        perm_bit(libc::S_IXGRP, 'x'),
+    );
+    let other = format!(
+        "{}{}{}",
+        perm_bit(libc::S_IROTH, 'r'),
+        perm_bit(libc::S_IWOTH, 'w'),
+        perm_bit(libc::S_IXOTH, 'x'),
+    );
+
+    format!("[{}][{}][{}]", owner, group, other)
+}
+
+/// Format Unix permission mode bits as a traditional 10-character string.
+///
+/// Used for JSON output. Returns strings like `-rw-r--r--` or `drwxr-xr-x`.
+fn format_permissions_traditional(mode: u32) -> String {
+    let file_type = match mode & libc::S_IFMT {
+        libc::S_IFDIR => 'd',
+        libc::S_IFLNK => 'l',
+        libc::S_IFIFO => 'p',
+        libc::S_IFSOCK => 's',
+        libc::S_IFBLK => 'b',
+        libc::S_IFCHR => 'c',
+        _ => '-',
+    };
+
+    let perm_bit = |mask: u32, ch: char| -> char {
+        if mode & mask != 0 { ch } else { '-' }
+    };
+
+    format!(
+        "{}{}{}{}{}{}{}{}{}{}",
+        file_type,
+        perm_bit(libc::S_IRUSR, 'r'),
+        perm_bit(libc::S_IWUSR, 'w'),
+        perm_bit(libc::S_IXUSR, 'x'),
+        perm_bit(libc::S_IRGRP, 'r'),
+        perm_bit(libc::S_IWGRP, 'w'),
+        perm_bit(libc::S_IXGRP, 'x'),
+        perm_bit(libc::S_IROTH, 'r'),
+        perm_bit(libc::S_IWOTH, 'w'),
+        perm_bit(libc::S_IXOTH, 'x'),
+    )
+}
+
+/// Format a UTC timestamp as a relative time phrase.
 fn format_relative_time(date: DateTime<Utc>) -> String {
     let now = Utc::now();
     let duration = now.signed_duration_since(date);
